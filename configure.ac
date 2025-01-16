@@ -47,7 +47,7 @@ PKG_CHECK_MODULES(limd_glue, libimobiledevice-glue-1.0 >= $LIMD_GLUE_VERSION)
 PKG_CHECK_MODULES(libtatsu, libtatsu-1.0 >= $LIBTATSU_VERSION)
 PKG_CHECK_MODULES(libzip, libzip >= $LIBZIP_VERSION)
 PKG_CHECK_MODULES(libcurl, libcurl >= $LIBCURL_VERSION)
-PKG_CHECK_MODULES(zlib, zlib >= $ZLIB_VERSION)
+PKG_CHECK_MODULES(zlib, zlib >= zlib)
 
 AC_CHECK_FUNCS([strsep strcspn mkstemp realpath])
 if test x$ac_cv_func_strsep != xyes; then
