@@ -35,6 +35,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <libimobiledevice-glue/thread.h>
 
 #ifdef WIN32
 #include <windows.h>
@@ -55,7 +56,7 @@
 #include "endianness.h"
 
 #ifdef DEBUG
-#define MAX_PRINT_LEN 64*1024*1024*1024
+#define MAX_PRINT_LEN 100000000
 #else
 #define MAX_PRINT_LEN 64*1024
 #endif
@@ -67,6 +68,7 @@ struct idevicerestore_mode_t idevicerestore_modes[] = {
 	{  3, "Recovery" },
 	{  4, "Restore"  },
 	{  5, "Normal"   },
+	{  6, "Port DFU" },
 };
 
 int idevicerestore_debug = 0;
@@ -82,17 +84,31 @@ static int info_disabled = 0;
 static int error_disabled = 0;
 static int debug_disabled = 0;
 
+static mutex_t log_mutex;
+static thread_once_t init_once = THREAD_ONCE_INIT;
+
+static void _log_init(void)
+{
+	mutex_init(&log_mutex);
+}
+
 void info(const char* format, ...)
 {
 	if (info_disabled) return;
+	thread_once(&init_once, _log_init);
+	mutex_lock(&log_mutex);
 	va_list vargs;
 	va_start(vargs, format);
 	vfprintf((info_stream) ? info_stream : stdout, format, vargs);
 	va_end(vargs);
+	fflush(info_stream?info_stream:stdout);
+	mutex_unlock(&log_mutex);
 }
 
 void error(const char* format, ...)
 {
+	thread_once(&init_once, _log_init);
+	mutex_lock(&log_mutex);
 	va_list vargs, vargs2;
 	va_start(vargs, format);
 	va_copy(vargs2, vargs);
@@ -102,6 +118,8 @@ void error(const char* format, ...)
 		vfprintf((error_stream) ? error_stream : stderr, format, vargs2);
 	}
 	va_end(vargs2);
+	fflush(error_stream?error_stream:stderr);
+	mutex_unlock(&log_mutex);
 }
 
 void debug(const char* format, ...)
@@ -110,10 +128,14 @@ void debug(const char* format, ...)
 	if (!idevicerestore_debug) {
 		return;
 	}
+	thread_once(&init_once, _log_init);
+	mutex_lock(&log_mutex);
 	va_list vargs;
 	va_start(vargs, format);
 	vfprintf((debug_stream) ? debug_stream : stderr, format, vargs);
 	va_end(vargs);
+	fflush(debug_stream?debug_stream:stderr);
+	mutex_unlock(&log_mutex);
 }
 
 void idevicerestore_set_info_stream(FILE* strm)
@@ -233,28 +255,52 @@ void debug_plist(plist_t plist) {
 		return;
 	}
 	if (size <= MAX_PRINT_LEN)
-		info("%s:printing %i bytes plist:\n%s", __FILE__, size, data);
+		info("printing %i bytes plist:\n%s", size, data);
 	else
-		info("%s:supressed printing %i bytes plist...\n", __FILE__, size);
+		info("supressed printing %i bytes plist...\n", size);
 	free(data);
 }
 
+void debug_plist2(plist_t plist) {
+    uint32_t size = 0;
+    char* data = NULL;
+    if(plist_to_xml(plist, &data, &size) != PLIST_ERR_SUCCESS) {
+        info("Failed to convert plist data to xml!\n");
+        return;
+    }
+    if (size <= MAX_PRINT_LEN)
+        info("%s:printing %i bytes plist:\n%s", __FILE__, size, data);
+    else
+        info("%s:supressed printing %i bytes plist...\n", __FILE__, size);
+    free(data);
+}
+
+static void printline(int percent){
+    info("%03d [",percent);for (int i=0; i<100; i++) putchar((percent >0) ? ((--percent > 0) ? '=' : '>') : ' ');
+    info("]");
+}
 void print_progress_bar(double progress) {
-#ifndef WIN32
+    if (info_disabled) return;
+#ifdef WIN32
+    info("\x1b[A\033[J"); //clear 2 lines
+    printline((int)progress);
+    info("\n");
+#else
 	if (info_disabled) return;
 	int i = 0;
 	if(progress < 0) return;
 	if(progress > 100) progress = 100;
-	info("\r[");
+	fprintf((info_stream) ? info_stream : stdout, "\r[");
 	for(i = 0; i < 50; i++) {
-		if(i < progress / 2) info("=");
-		else info(" ");
+		if(i < progress / 2) fprintf((info_stream) ? info_stream : stdout, "=");
+		else fprintf((info_stream) ? info_stream : stdout, " ");
 	}
-	info("] %5.1f%%", progress);
-	if(progress >= 100) info("\n");
-	fflush((info_stream) ? info_stream : stdout);
+	fprintf((info_stream) ? info_stream : stdout, "] %5.1f%%", progress);
+	if(progress >= 100) fprintf((info_stream) ? info_stream : stdout, "\n");
 #endif
+    fflush((info_stream) ? info_stream : stdout);
 }
+
 
 #define GET_RAND(min, max) ((rand() % (max - min)) + min)
 
@@ -470,14 +516,17 @@ char *get_temp_filename(const char *prefix)
 
 void idevicerestore_progress(struct idevicerestore_client_t* client, int step, double progress)
 {
+	thread_once(&init_once, _log_init);
+	mutex_lock(&log_mutex);
 	if(client && client->progress_cb) {
 		client->progress_cb(step, progress, client->progress_cb_data);
 	} else {
 		// we don't want to be too verbose in regular idevicerestore.
-		if ((step == RESTORE_STEP_UPLOAD_FS) || (step == RESTORE_STEP_VERIFY_FS) || (step == RESTORE_STEP_FLASH_FW)) {
+		if ((step == RESTORE_STEP_UPLOAD_FS) || (step == RESTORE_STEP_VERIFY_FS) || (step == RESTORE_STEP_FLASH_FW) || (step == RESTORE_STEP_UPLOAD_IMG)) {
 			print_progress_bar(100.0 * progress);
 		}
 	}
+	mutex_unlock(&log_mutex);
 }
 
 #ifndef HAVE_STRSEP
@@ -564,141 +613,19 @@ void get_user_input(char *buf, int maxlen, int secure)
 	buf[len] = 0;
 }
 
-uint64_t _plist_dict_get_uint(plist_t dict, const char *key)
+const char* path_get_basename(const char* path)
 {
-	uint64_t uintval = 0;
-	char *strval = NULL;
-	uint64_t strsz = 0;
-	plist_t node = plist_dict_get_item(dict, key);
-	if (!node) {
-		return uintval;
-	}
-	switch (plist_get_node_type(node)) {
-	case PLIST_UINT:
-		plist_get_uint_val(node, &uintval);
-		break;
-	case PLIST_STRING:
-		plist_get_string_val(node, &strval);
-		if (strval) {
-			uintval = strtoull(strval, NULL, 0);
-			free(strval);
+#ifdef WIN32
+	const char *p = path + strlen(path);
+	while (p > path) {
+		if ((*p == '/') || (*p == '\\')) {
+			return p+1;
 		}
-		break;
-	case PLIST_DATA:
-		plist_get_data_val(node, &strval, &strsz);
-		if (strval) {
-			if (strsz == 8) {
-				uintval = le64toh(*(uint64_t*)strval);
-			} else if (strsz == 4) {
-				uintval = le32toh(*(uint32_t*)strval);
-			} else if (strsz == 2) {
-				uintval = le16toh(*(uint16_t*)strval);
-			} else if (strsz == 1) {
-				uintval = strval[0];
-			} else {
-				error("%s: ERROR: invalid size %" PRIu64 " for data to integer conversion\n", __func__, strsz);
-			}
-			free(strval);
-		}
-		break;
-	default:
-		break;
+		p--;
 	}
-	return uintval;
-}
-
-uint8_t _plist_dict_get_bool(plist_t dict, const char *key)
-{
-	uint8_t bval = 0;
-	uint64_t uintval = 0;
-	char *strval = NULL;
-	uint64_t strsz = 0;
-	plist_t node = plist_dict_get_item(dict, key);
-	if (!node) {
-		return 0;
-	}
-	switch (plist_get_node_type(node)) {
-	case PLIST_BOOLEAN:
-		plist_get_bool_val(node, &bval);
-		break;
-	case PLIST_UINT:
-		plist_get_uint_val(node, &uintval);
-		bval = (uint8_t)uintval;
-		break;
-	case PLIST_STRING:
-		plist_get_string_val(node, &strval);
-		if (strval) {
-			if (strcmp(strval, "true")) {
-				bval = 1;
-			} else if (strcmp(strval, "false")) {
-				bval = 0;
-			}
-			free(strval);
-		}
-		break;
-	case PLIST_DATA:
-		plist_get_data_val(node, &strval, &strsz);
-		if (strval) {
-			if (strsz == 1) {
-				bval = strval[0];
-			} else {
-				error("%s: ERROR: invalid size %" PRIu64 " for data to boolean conversion\n", __func__, strsz);
-			}
-			free(strval);
-		}
-		break;
-	default:
-		break;
-	}
-	return bval;
-}
-
-int _plist_dict_copy_uint(plist_t target_dict, plist_t source_dict, const char *key, const char *alt_source_key)
-{
-	if (plist_dict_get_item(source_dict, (alt_source_key) ? alt_source_key : key) == NULL) {
-		return -1;
-	}
-	uint64_t u64val = _plist_dict_get_uint(source_dict, (alt_source_key) ? alt_source_key : key);
-	plist_dict_set_item(target_dict, key, plist_new_uint(u64val));
-	return 0;
-}
-
-int _plist_dict_copy_bool(plist_t target_dict, plist_t source_dict, const char *key, const char *alt_source_key)
-{
-	if (plist_dict_get_item(source_dict, (alt_source_key) ? alt_source_key : key) == NULL) {
-		return -1;
-	}
-	uint64_t bval = _plist_dict_get_bool(source_dict, (alt_source_key) ? alt_source_key : key);
-	plist_dict_set_item(target_dict, key, plist_new_bool(bval));
-	return 0;
-}
-
-int _plist_dict_copy_data(plist_t target_dict, plist_t source_dict, const char *key, const char *alt_source_key)
-{
-	plist_t node = plist_dict_get_item(source_dict, (alt_source_key) ? alt_source_key : key);
-	if (!PLIST_IS_DATA(node)) {
-		return -1;
-	}
-	plist_dict_set_item(target_dict, key, plist_copy(node));
-	return 0;
-}
-
-int _plist_dict_copy_string(plist_t target_dict, plist_t source_dict, const char *key, const char *alt_source_key)
-{
-	plist_t node = plist_dict_get_item(source_dict, (alt_source_key) ? alt_source_key : key);
-	if (!PLIST_IS_STRING(node)) {
-		return -1;
-	}
-	plist_dict_set_item(target_dict, key, plist_copy(node));
-	return 0;
-}
-
-int _plist_dict_copy_item(plist_t target_dict, plist_t source_dict, const char *key, const char *alt_source_key)
-{
-	plist_t node = plist_dict_get_item(source_dict, (alt_source_key) ? alt_source_key : key);
-	if (!node) {
-		return -1;
-	}
-	plist_dict_set_item(target_dict, key, plist_copy(node));
-	return 0;
+	return p;
+#else
+	const char *p = strrchr(path, '/');
+	return p ? p + 1 : path;
+#endif
 }

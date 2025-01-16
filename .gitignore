@@ -11,6 +11,7 @@
 *.lo
 *.o
 *.patch
+*.zst
 *.po
 *.so
 *.swp
@@ -63,3 +64,4 @@ src/idevicerestore
 stamp-h1
 swig/*
 xcuserdata
+src/idevicerestore.exe

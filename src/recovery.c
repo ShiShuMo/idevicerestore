@@ -29,8 +29,9 @@
 #include <libimobiledevice/restore.h>
 #include <libimobiledevice/libimobiledevice.h>
 
+#include <libtatsu/tss.h>
+
 #include "idevicerestore.h"
-#include "tss.h"
 #include "img3.h"
 #include "restore.h"
 #include "recovery.h"
@@ -101,36 +102,6 @@ int recovery_client_new(struct idevicerestore_client_t* client)
 	return 0;
 }
 
-
-int recovery_check_mode(struct idevicerestore_client_t* client) {
-	irecv_client_t recovery = NULL;
-	irecv_error_t recovery_error = IRECV_E_SUCCESS;
-	int mode = 0;
-
-	if (client->udid && client->ecid == 0) {
-		/* if we have a UDID but no ECID we can't make sure this is the correct device */
-		return -1;
-	}
-
-	irecv_init();
-	recovery_error=irecv_open_with_ecid(&recovery, client->ecid);
-
-	if (recovery_error != IRECV_E_SUCCESS) {
-		return -1;
-	}
-
-	irecv_get_mode(recovery, &mode);
-
-	if ((mode == IRECV_K_DFU_MODE) || (mode == IRECV_K_WTF_MODE)) {
-		irecv_close(recovery);
-		return -1;
-	}
-
-	irecv_close(recovery);
-	recovery = NULL;
-	return 0;
-}
-
 int recovery_set_autoboot(struct idevicerestore_client_t* client, int enable) {
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
@@ -149,88 +120,116 @@ int recovery_set_autoboot(struct idevicerestore_client_t* client, int enable) {
 	return 0;
 }
 
+int received_cb(irecv_client_t client, const irecv_event_t* event)
+{
+  if (event->type == IRECV_RECEIVED) {
+    int i = 0;
+    int size = event->size;
+    const char* data = event->data;
+    for (i = 0; i < size; i++) {
+      printf("%c", data[i]);
+    }
+  }
+
+  return 0;
+}
+
 int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build_identity)
 {
-	if (client->build_major >= 8) {
-		client->restore_boot_args = strdup("rd=md0 nand-enable-reformat=1 -progress");
-	} else if (client->macos_variant) {
-		client->restore_boot_args = strdup("rd=md0 nand-enable-reformat=1 -progress -restore");
-	}
+      if (client->build_major >= 8) {
+              client->restore_boot_args = strdup("rd=md0 nand-enable-reformat=1 -progress");
+      } else if (client->macos_variant) {
+              client->restore_boot_args = strdup("rd=md0 nand-enable-reformat=1 -progress -restore");
+      }
 
-	/* upload data to make device boot restore mode */
-	if(client->recovery == NULL) {
-		if (recovery_client_new(client) < 0) {
-			return -1;
-		}
-	}
+      /* upload data to make device boot restore mode */
+      if(client->recovery == NULL) {
+              if (recovery_client_new(client) < 0) {
+                      return -1;
+              }
+      }
 
-	if ((client->build_major > 8) && !(client->flags & FLAG_CUSTOM)) {
-		if (!client->image4supported) {
-			/* send ApTicket */
-			if (recovery_send_ticket(client) < 0) {
-				error("ERROR: Unable to send APTicket\n");
-				return -1;
-			}
-		}
-	}
+      if ((client->build_major > 8) && !(client->flags & FLAG_CUSTOM)) {
+              if (!client->image4supported) {
+                      /* send ApTicket */
+                      if (recovery_send_ticket(client) < 0) {
+                              error("ERROR: Unable to send APTicket\n");
+                              return -1;
+                      }
+              }
+      }
 
-    //no need to set auto-boot false when we want to just boot the device
-	if ((client->flags & FLAG_BOOT) == 0) if (recovery_set_autoboot(client, 0) < 0) return -1;
+    info("Recovery Mode Environment:\n");
+    char* value = NULL;
+    irecv_getenv(client->recovery->client, "build-version", &value);
+    info("iBoot build-version=%s\n", (value) ? value : "(unknown)");
+    free(value);
+    value = NULL;
 
-	info("Recovery Mode Environment:\n");
-	char* value = NULL;
-	irecv_getenv(client->recovery->client, "build-version", &value);
-	info("iBoot build-version=%s\n", (value) ? value : "(unknown)");
-	free(value);
-	value = NULL;
+    irecv_getenv(client->recovery->client, "build-style", &value);
+    info("iBoot build-style=%s\n", (value) ? value : "(unknown)");
+    free(value);
+    value = NULL;
 
-	irecv_getenv(client->recovery->client, "build-style", &value);
-	info("iBoot build-style=%s\n", (value) ? value : "(unknown)");
-	free(value);
-	value = NULL;
+    unsigned long boot_stage = 0;
+    irecv_getenv(client->recovery->client, "boot-stage", &value);
+    if (value) {
+      boot_stage = strtoul(value, NULL, 0);
+    }
 
-	unsigned long radio_error = 0;
-	irecv_getenv(client->recovery->client, "radio-error", &value);
-	if (value) {
-		radio_error = strtoul(value, NULL, 0);
-	}
-	if (radio_error > 0) {
-		info("radio-error=%s\n", value);
-		free(value);
-		value = NULL;
-		irecv_getenv(client->recovery->client, "radio-error-string", &value);
-		if (value) {
-			info("radio-error-string=%s\n", value);
-			free(value);
-			value = NULL;
-		}
-	}
+    if (boot_stage > 0) {
+      info("iBoot boot-stage=%s\n", value);
+      free(value);
+      value = NULL;
+      if (boot_stage != 2) {
+        error("ERROR: iBoot should be at boot stage 2, continuing anyway...\n");
+      }
+    }
 
-	/* send logo and show it */
-	if (recovery_send_applelogo(client, build_identity) < 0) {
-		error("ERROR: Unable to send AppleLogo\n");
-		return -1;
-	}
+    unsigned long radio_error = 0;
+    irecv_getenv(client->recovery->client, "radio-error", &value);
+    if (value) {
+            radio_error = strtoul(value, NULL, 0);
+    }
+    if (radio_error > 0) {
+            info("radio-error=%s\n", value);
+            free(value);
+            value = NULL;
+            irecv_getenv(client->recovery->client, "radio-error-string", &value);
+            if (value) {
+                    info("radio-error-string=%s\n", value);
+                    free(value);
+                    value = NULL;
+            }
+    }
 
-    /* send ramdisk and run it */
-    if ((client->flags & FLAG_BOOT) == 0) {
-        if (recovery_send_ramdisk(client, build_identity) < 0) {
-            error("ERROR: Unable to send Ramdisk\n");
+    if (recovery_set_autoboot(client, 0) < 0) {
+      return -1;
+    }
+
+    /* send logo and show it */
+    if (recovery_send_applelogo(client, build_identity) < 0) {
+            error("ERROR: Unable to send AppleLogo\n");
             return -1;
-        }
     }
     
-	/* send components loaded by iBoot */
-	if (recovery_send_loaded_by_iboot(client, build_identity) < 0) {
-		error("ERROR: Unable to send components supposed to be loaded by iBoot\n");
-		return -1;
-	}
+    /* send components loaded by iBoot */
+    if (recovery_send_loaded_by_iboot(client, build_identity) < 0) {
+            error("ERROR: Unable to send components supposed to be loaded by iBoot\n");
+            return -1;
+    }
 
-	/* send devicetree and load it */
-	if (recovery_send_component_and_command(client, build_identity, "RestoreDeviceTree", "devicetree") < 0) {
-		error("ERROR: Unable to send DeviceTree\n");
-		return -1;
-	}
+    /* send ramdisk and run it */
+    if (recovery_send_ramdisk(client, build_identity) < 0) {
+      error("ERROR: Unable to send Ramdisk\n");
+      return -1;
+    }
+
+    /* send devicetree and load it */
+    if (recovery_send_component_and_command(client, build_identity, "RestoreDeviceTree", "devicetree") < 0) {
+            error("ERROR: Unable to send DeviceTree\n");
+            return -1;
+    }
 
     if(!(client->flags & FLAG_NO_RSEP)) {
         if (build_identity_has_component(build_identity, "RestoreSEP")) {
@@ -246,25 +245,25 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
 
     /* send kernelcache and load it */
 
-	mutex_lock(&client->device_event_mutex);
-	if (recovery_send_kernelcache(client, build_identity) < 0) {
-		mutex_unlock(&client->device_event_mutex);
-		error("ERROR: Unable to send KernelCache\n");
-		return -1;
-	}
-	
-
-    if ((client->flags & FLAG_NOBOOTX) == 0){
-	    debug("DEBUG: Waiting for device to disconnect...\n");
-	    cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 30000);
-	    if (client->mode == MODE_RECOVERY || (client->flags & FLAG_QUIT)) {
-		    mutex_unlock(&client->device_event_mutex);
-		    error("ERROR: Failed to place device in restore mode\n");
-		    return -1;
-	    }
-        mutex_unlock(&client->device_event_mutex);
+    mutex_lock(&client->device_event_mutex);
+    if (recovery_send_kernelcache(client, build_identity) < 0) {
+      mutex_unlock(&client->device_event_mutex);
+      error("ERROR: Unable to send KernelCache\n");
+      return -1;
     }
-	return 0;
+
+
+  if ((client->flags & FLAG_NOBOOTX) == 0){
+    debug("DEBUG: Waiting for device to disconnect...\n");
+    cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 30000);
+    if (client->mode == MODE_RECOVERY || (client->flags & FLAG_QUIT)) {
+      mutex_unlock(&client->device_event_mutex);
+      error("ERROR: Failed to place device in restore mode\n");
+      return -1;
+    }
+    mutex_unlock(&client->device_event_mutex);
+  }
+  return 0;
 }
 
 int recovery_send_ticket(struct idevicerestore_client_t* client)
@@ -304,7 +303,7 @@ int recovery_send_component(struct idevicerestore_client_t* client, plist_t buil
 	unsigned char* data = NULL;
 	char* path = NULL;
 	irecv_error_t err = 0;
-	int ret;
+	int ret = 0;
  
     if (!client->recovery_custom_component_function) {
         if (client->tss) {
@@ -334,21 +333,20 @@ int recovery_send_component(struct idevicerestore_client_t* client, plist_t buil
             client->kerneldatasize = NULL;
             client->kerneldata = NULL;
             info("1337 CUSTOM KERNEL!\n");
+        } else if(!strcmp(component, "RestoreSEP") && client->sepfwdatasize) {
+            component_data = malloc(component_size = (unsigned int)client->sepfwdatasize);
+            memcpy(component_data, client->sepfwdata, component_size);
         } else {
             ret = extract_component(client->ipsw, path, &component_data, &component_size);
             if (ret < 0) {
                 error("ERROR: Unable to extract '%s' component\n", component);
+                free(path);
                 return -1;
             }
         }
 
         free(path);
-        if (ret < 0) {
-            error("ERROR: Unable to extract component: %s\n", component);
-            return -1;
-        }
-
-        ret = personalize_component(component, component_data, component_size, client->tss, &data, &size);
+        ret = personalize_component(client, component, component_data, component_size, client->tss, &data, &size);
         free(component_data);
         if (ret < 0) {
             error("ERROR: Unable to get personalized component: %s\n", component);
@@ -404,7 +402,7 @@ int recovery_send_ibec(struct idevicerestore_client_t* client, plist_t build_ide
 		return -1;
 	}
 
-	recovery_error = irecv_send_command(client->recovery->client, "go");
+	recovery_error = irecv_send_command_breq(client->recovery->client, "go", 1);
 	if (recovery_error != IRECV_E_SUCCESS) {
 		error("ERROR: Unable to execute %s\n", component);
 		return -1;
@@ -557,10 +555,8 @@ int recovery_send_kernelcache(struct idevicerestore_client_t* client, plist_t bu
 		recovery_error = irecv_send_command(client->recovery->client, setba);
 	}
 
-    if ((client->flags & FLAG_NOBOOTX) == 0) recovery_error = irecv_send_command(client->recovery->client, "bootx");
-    else info("Flag nobootx detected! Not executing \"bootx\", but device is ready\n");
-    
-    if (recovery_error != IRECV_E_SUCCESS) {
+	recovery_error = irecv_send_command_breq(client->recovery->client, "bootx", 1);
+	if (recovery_error != IRECV_E_SUCCESS) {
 		error("ERROR: Unable to execute %s\n", component);
 		return -1;
 	}
@@ -584,7 +580,7 @@ int recovery_is_image4_supported(struct idevicerestore_client_t* client)
 	return (device_info->ibfl & IBOOT_FLAG_IMAGE4_AWARE);
 }
 
-int recovery_get_ap_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, int* nonce_size)
+int recovery_get_ap_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, unsigned int* nonce_size)
 {
 	if(client->recovery == NULL) {
 		if (recovery_client_new(client) < 0) {
@@ -609,7 +605,7 @@ int recovery_get_ap_nonce(struct idevicerestore_client_t* client, unsigned char*
 	return 0;
 }
 
-int recovery_get_sep_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, int* nonce_size)
+int recovery_get_sep_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, unsigned int* nonce_size)
 {
 	if(client->recovery == NULL) {
 		if (recovery_client_new(client) < 0) {
@@ -636,6 +632,6 @@ int recovery_get_sep_nonce(struct idevicerestore_client_t* client, unsigned char
 
 int recovery_send_reset(struct idevicerestore_client_t* client)
 {
-	irecv_send_command(client->recovery->client, "reset");
+	irecv_send_command_breq(client->recovery->client, "reset", 1);
 	return 0;
 }
