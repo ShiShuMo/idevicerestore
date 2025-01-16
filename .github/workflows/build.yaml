@@ -13,7 +13,7 @@ jobs:
     - name: install dependencies
       run: |
           sudo apt-get update
-          sudo apt-get install libzip-dev libcurl4-openssl-dev libusb-1.0-0-dev
+          sudo apt-get install libzip-dev libcurl4-openssl-dev libusb-1.0-0-dev zlib1g-dev
     - name: prepare environment
       run: |
           echo "target_triplet=`gcc -dumpmachine`" >> $GITHUB_ENV
@@ -93,9 +93,9 @@ jobs:
     - name: install dependencies
       run: |
           if test -x "`which port`"; then
-            sudo port install libtool autoconf automake pkgconfig
+            sudo port install libtool autoconf automake pkgconfig zlib
           else
-            brew install libtool autoconf automake pkgconfig
+            brew install libtool autoconf automake pkgconfig zlib
           fi
       shell: bash
     - name: fetch libirecovery
